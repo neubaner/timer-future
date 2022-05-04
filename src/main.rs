@@ -1,5 +1,10 @@
 use std::{
+    fs::File,
+    future::Future,
     mem::{self, MaybeUninit},
+    os::unix::prelude::{FromRawFd, RawFd},
+    pin::Pin,
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
@@ -13,6 +18,72 @@ macro_rules! syscall {
           Ok(res)
       }
   }};
+}
+
+pub struct Timer {
+    deadline: Duration,
+    fd: Option<RawFd>,
+    is_completed: bool,
+}
+
+impl Timer {
+    pub fn new(deadline: Duration) -> Timer {
+        Timer {
+            deadline,
+            fd: None,
+            is_completed: false,
+        }
+    }
+
+    fn start_timer(deadline: Duration) -> Result<RawFd, std::io::Error> {
+        let timer_fd = syscall!(timerfd_create(
+            libc::CLOCK_MONOTONIC,
+            libc::TFD_NONBLOCK | libc::TFD_CLOEXEC,
+        ))?;
+
+        let spec = libc::itimerspec {
+            it_value: libc::timespec {
+                tv_sec: deadline.as_secs() as i64,
+                tv_nsec: deadline.subsec_nanos() as i64,
+            },
+            it_interval: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+        };
+
+        let _ = syscall!(timerfd_settime(timer_fd, 0, &spec, std::ptr::null_mut()))?;
+
+        Ok(timer_fd)
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd.take() {
+            let _ = unsafe { File::from_raw_fd(fd) };
+        }
+    }
+}
+
+impl Future for Timer {
+    type Output = Result<(), std::io::Error>;
+
+    fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.is_completed {
+            Poll::Ready(Ok(()))
+        } else {
+            let fd_result = Timer::start_timer(self.deadline);
+            let fd = match fd_result {
+                Ok(fd) => fd,
+                Err(err) => return Poll::Ready(Err(err))
+            };
+            self.fd = Some(fd);
+            
+            // TODO: register the timer into the epoll with a Waker
+            Poll::Pending
+        }
+    }
 }
 
 fn main() -> Result<(), std::io::Error> {
