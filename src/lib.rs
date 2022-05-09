@@ -1,7 +1,11 @@
-use std::{sync::Arc, task::{Waker, RawWakerVTable, RawWaker}, mem::{self, ManuallyDrop}};
+use std::{
+    mem::{ManuallyDrop},
+    sync::Arc,
+    task::{RawWaker, RawWakerVTable, Waker},
+};
 
-pub trait ArcWake : Send + Sync {
-    fn wake_by_ref(self: &Arc<Self>);
+pub trait ArcWake: Send + Sync {
+    fn wake_by_ref(arc_self: &Arc<Self>);
     fn wake(self: Arc<Self>) {
         Self::wake_by_ref(&self)
     }
@@ -12,14 +16,14 @@ fn waker_vtable<W: ArcWake>() -> &'static RawWakerVTable {
         clone_arc_raw::<W>,
         wake_arc_raw::<W>,
         wake_arc_by_ref_raw::<W>,
-        drop_arc_raw::<W>
+        drop_arc_raw::<W>,
     )
 }
 
 unsafe fn clone_arc_raw<W: ArcWake>(data: *const ()) -> RawWaker {
-    let arc = Arc::from_raw(data.cast::<W>());
+    let arc = ManuallyDrop::new(Arc::from_raw(data.cast::<W>()));
     // Increase the reference counting
-    mem::forget(arc.clone());
+    let _ = arc.clone();
     RawWaker::new(data, waker_vtable::<W>())
 }
 
@@ -34,7 +38,8 @@ unsafe fn wake_arc_by_ref_raw<W: ArcWake>(data: *const ()) {
 }
 
 unsafe fn drop_arc_raw<W: ArcWake>(data: *const ()) {
-    drop(Arc::from_raw(data.cast::<W>()));
+    let arc = Arc::from_raw(data.cast::<W>());
+    drop(arc);
 }
 
 pub fn waker<W: ArcWake>(arc: Arc<W>) -> Waker {
