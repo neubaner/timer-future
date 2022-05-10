@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{hash_map::Entry, HashMap},
     fs::File,
     future::Future,
     mem::{ManuallyDrop, MaybeUninit},
@@ -125,10 +125,10 @@ impl Future for Timer {
             if let Entry::Occupied(mut e) = reactor.wakers.entry(fd) {
                 e.insert(cx.waker().clone());
 
-                return Poll::Pending
+                return Poll::Pending;
             }
         }
-        
+
         if !self.first_call {
             return Poll::Ready(Ok(()));
         }
