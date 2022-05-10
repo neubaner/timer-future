@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     fs::File,
     future::Future,
     mem::{ManuallyDrop, MaybeUninit},
@@ -117,22 +117,34 @@ impl Future for Timer {
     type Output = Result<(), std::io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if !self.first_call {
-            Poll::Ready(Ok(()))
-        } else {
-            let fd = Timer::start_timer(self.deadline)?;
-            self.fd = Some(fd);
+        if let Some(fd) = self.fd {
+            let mut reactor = self.reactor.lock().unwrap();
 
-            let event_flags = (libc::EPOLLIN | libc::EPOLLET | libc::EPOLLONESHOT) as u32;
-            self.reactor
-                .lock()
-                .unwrap()
-                .register_insterest(fd, event_flags, cx.waker().clone())?;
+            // If we are _polled_ again and the reactor still didn't consume our waker,
+            // we should just replace the waker and don't register the timer again
+            if let Entry::Occupied(mut e) = reactor.wakers.entry(fd) {
+                e.insert(cx.waker().clone());
 
-            self.first_call = false;
-
-            Poll::Pending
+                return Poll::Pending
+            }
         }
+        
+        if !self.first_call {
+            return Poll::Ready(Ok(()));
+        }
+
+        let fd = Timer::start_timer(self.deadline)?;
+        self.fd = Some(fd);
+
+        let event_flags = (libc::EPOLLIN | libc::EPOLLET | libc::EPOLLONESHOT) as u32;
+        self.reactor
+            .lock()
+            .unwrap()
+            .register_insterest(fd, event_flags, cx.waker().clone())?;
+
+        self.first_call = false;
+
+        Poll::Pending
     }
 }
 
