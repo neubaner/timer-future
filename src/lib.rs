@@ -5,7 +5,7 @@ use std::{
     mem::{ManuallyDrop, MaybeUninit},
     os::unix::prelude::{FromRawFd, RawFd},
     pin::Pin,
-    sync::{mpsc, Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     time::{Duration, Instant},
 };
@@ -136,75 +136,54 @@ impl Future for Timer {
     }
 }
 
-pub struct Task {
-    future: Mutex<Option<Pin<Box<dyn Future<Output = ()> + 'static + Send>>>>,
-    // Wrapping Sender in a mutex to make it Sync.
-    // Maybe there's a better way to handle this?
-    sender: Mutex<mpsc::Sender<Arc<Task>>>,
+struct Waiter {
+    is_woken: AtomicBool,
 }
 
-impl ArcWake for Task {
+impl Waiter {
+    fn new() -> Arc<Waiter> {
+        Arc::new(Waiter {
+            is_woken: AtomicBool::new(true),
+        })
+    }
+
+    fn reset_waiter(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.is_woken.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl ArcWake for Waiter {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self
-            .sender
-            .lock()
-            .unwrap()
-            .send(Arc::clone(arc_self))
-            .expect("Could not send message");
+        use std::sync::atomic::Ordering;
+        arc_self.is_woken.store(true, Ordering::SeqCst);
     }
 }
 
 pub struct Executor {
-    sender: mpsc::Sender<Arc<Task>>,
-    receiver: mpsc::Receiver<Arc<Task>>,
     reactor: Arc<Mutex<Reactor>>,
 }
 
 impl Executor {
     pub fn new(reactor: Arc<Mutex<Reactor>>) -> Executor {
-        let (sender, receiver) = mpsc::channel();
-        Executor {
-            sender,
-            receiver,
-            reactor,
-        }
+        Executor { reactor }
     }
 
-    pub fn block_on<F: Future<Output = ()> + 'static + Send>(self, future: F) -> F::Output {
-        let future = Box::pin(future);
-        let task = Arc::new(Task {
-            future: Mutex::new(Some(future)),
-            sender: Mutex::new(self.sender.clone()),
-        });
+    pub fn block_on<F: Future>(self, future: F) -> F::Output {
+        let mut future = Box::pin(future);
 
-        self.sender.send(task).unwrap();
+        let waiter = Waiter::new();
+        let waker = waker(Arc::clone(&waiter));
 
+        let mut context = Context::from_waker(&waker);
         loop {
-            if self.wait_for_one_task().is_err() {
-                break;
+            if waiter.reset_waiter() {
+                if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                    return value;
+                }
             }
 
             self.reactor.lock().unwrap().poll_events().unwrap();
-        }
-    }
-
-    pub fn wait_for_one_task(&self) -> Result<(), mpsc::RecvError> {
-        match self.receiver.recv() {
-            Ok(task) => {
-                let mut future_slot = task.future.lock().unwrap();
-
-                if let Some(mut future) = future_slot.take() {
-                    let waker = waker(Arc::clone(&task));
-                    let mut context = Context::from_waker(&waker);
-
-                    if future.as_mut().poll(&mut context).is_pending() {
-                        *future_slot = Some(future);
-                    }
-                }
-
-                Ok(())
-            }
-            Err(err) => Err(err),
         }
     }
 }

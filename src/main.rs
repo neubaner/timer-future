@@ -6,18 +6,22 @@ fn main() -> Result<(), std::io::Error> {
     let reactor = Reactor::new()?;
     let executor = Executor::new(Arc::clone(&reactor));
 
-    executor.block_on(async move {
-        let elapsed = timer_future::sleep(Duration::from_secs(3), Arc::clone(&reactor))
+    let total_elapsed = executor.block_on(async move {
+        let elapsed1 = timer_future::sleep(Duration::from_secs(3), Arc::clone(&reactor))
             .await
             .as_secs_f64();
 
-        println!("Sleeping for: {elapsed}");
+        println!("Sleeping for: {elapsed1}");
 
-        let elapsed = timer_future::sleep(Duration::from_secs(5), Arc::clone(&reactor))
+        let elapsed2 = timer_future::sleep(Duration::from_secs(5), Arc::clone(&reactor))
             .await
             .as_secs_f64();
-        println!("Sleeping for: {elapsed}");
+        println!("Sleeping for: {elapsed2}");
+
+        elapsed1 + elapsed2
     });
+
+    println!("Total elapsed is {total_elapsed}");
 
     Ok(())
 }
