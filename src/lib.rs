@@ -228,18 +228,25 @@ impl Reactor {
             unsafe { MaybeUninit::uninit().assume_init() };
         let events_ptr = events.as_mut_ptr().cast::<libc::epoll_event>();
 
-        let nfds = syscall!(epoll_wait(self.epoll_fd, events_ptr, MAX_EVENTS as i32, -1))?;
+        loop {
+            let nfds = match syscall!(epoll_wait(self.epoll_fd, events_ptr, MAX_EVENTS as i32, -1))
+            {
+                Ok(nfds) => nfds,
+                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
 
-        for i in 0..nfds {
-            let event: libc::epoll_event = unsafe { events[i as usize].assume_init() };
-            let fd = event.u64 as RawFd;
+            for i in 0..nfds {
+                let event: libc::epoll_event = unsafe { events[i as usize].assume_init() };
+                let fd = event.u64 as RawFd;
 
-            if let Some(waker) = self.wakers.remove(&fd) {
-                waker.wake();
+                if let Some(waker) = self.wakers.remove(&fd) {
+                    waker.wake();
+                }
             }
-        }
 
-        Ok(())
+            return Ok(());
+        }
     }
 }
 
