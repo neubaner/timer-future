@@ -11,12 +11,12 @@ fn main() -> Result<(), std::io::Error> {
             .await
             .as_secs_f64();
 
-        println!("Sleeping for: {elapsed1}");
+        println!("Slept for: {elapsed1}");
 
         let elapsed2 = timer_future::sleep(Duration::from_secs(5), Arc::clone(&reactor))
             .await
             .as_secs_f64();
-        println!("Sleeping for: {elapsed2}");
+        println!("Slept for: {elapsed2}");
 
         elapsed1 + elapsed2
     });
