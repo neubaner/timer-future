@@ -6,7 +6,7 @@ use std::{
     fs::File,
     future::Future,
     mem::MaybeUninit,
-    os::unix::prelude::{FromRawFd, RawFd},
+    os::unix::prelude::{FromRawFd, RawFd, AsRawFd},
     pin::Pin,
     sync::{atomic::AtomicBool, Arc, Mutex},
     task::{Context, Poll, Waker},
@@ -29,7 +29,7 @@ macro_rules! syscall {
 
 pub struct Timer {
     deadline: Duration,
-    fd: Option<RawFd>,
+    file: Option<File>,
     first_call: bool,
     reactor: Arc<Mutex<Reactor>>,
 }
@@ -39,7 +39,7 @@ impl Timer {
     pub fn new(deadline: Duration, reactor: Arc<Mutex<Reactor>>) -> Timer {
         Timer {
             deadline,
-            fd: None,
+            file: None,
             first_call: true,
             reactor,
         }
@@ -69,19 +69,11 @@ impl Timer {
     }
 }
 
-impl Drop for Timer {
-    fn drop(&mut self) {
-        if let Some(fd) = self.fd.take() {
-            let _ = unsafe { File::from_raw_fd(fd) };
-        }
-    }
-}
-
 impl Future for Timer {
     type Output = Result<(), std::io::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(fd) = self.fd {
+        if let Some(fd) = self.file.as_ref().map(|file| file.as_raw_fd()) {
             let mut reactor = self.reactor.lock().unwrap();
 
             // If we are _polled_ again and the reactor still didn't consume our waker,
@@ -98,7 +90,7 @@ impl Future for Timer {
         }
 
         let fd = Timer::start_timer(self.deadline)?;
-        self.fd = Some(fd);
+        self.file = Some(unsafe { File::from_raw_fd(fd) });
 
         let event_flags = (libc::EPOLLIN | libc::EPOLLET | libc::EPOLLONESHOT) as u32;
         self.reactor
