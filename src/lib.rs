@@ -1,57 +1,19 @@
+#![deny(rust_2018_idioms)]
+pub mod waker;
+
 use std::{
     collections::{hash_map::Entry, HashMap},
     fs::File,
     future::Future,
-    mem::{ManuallyDrop, MaybeUninit},
+    mem::MaybeUninit,
     os::unix::prelude::{FromRawFd, RawFd},
     pin::Pin,
     sync::{atomic::AtomicBool, Arc, Mutex},
-    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
-    time::{Duration, Instant},
+    task::{Context, Poll, Waker},
+    time::Duration,
 };
 
-pub trait ArcWake: Send + Sync {
-    fn wake_by_ref(arc_self: &Arc<Self>);
-    fn wake(self: Arc<Self>) {
-        Self::wake_by_ref(&self)
-    }
-}
-
-fn waker_vtable<W: ArcWake>() -> &'static RawWakerVTable {
-    &RawWakerVTable::new(
-        clone_arc_raw::<W>,
-        wake_arc_raw::<W>,
-        wake_arc_by_ref_raw::<W>,
-        drop_arc_raw::<W>,
-    )
-}
-
-unsafe fn clone_arc_raw<W: ArcWake>(data: *const ()) -> RawWaker {
-    let arc = ManuallyDrop::new(Arc::from_raw(data.cast::<W>()));
-    // Increase the reference counting
-    let _ = arc.clone();
-    RawWaker::new(data, waker_vtable::<W>())
-}
-
-unsafe fn wake_arc_raw<W: ArcWake>(data: *const ()) {
-    let arc = Arc::from_raw(data.cast::<W>());
-    ArcWake::wake(arc)
-}
-
-unsafe fn wake_arc_by_ref_raw<W: ArcWake>(data: *const ()) {
-    let arc = ManuallyDrop::new(Arc::from_raw(data.cast::<W>()));
-    ArcWake::wake_by_ref(&arc);
-}
-
-unsafe fn drop_arc_raw<W: ArcWake>(data: *const ()) {
-    let arc = Arc::from_raw(data.cast::<W>());
-    drop(arc);
-}
-
-pub fn waker<W: ArcWake>(arc: Arc<W>) -> Waker {
-    let ptr = Arc::into_raw(arc).cast::<()>();
-    unsafe { Waker::from_raw(RawWaker::new(ptr, waker_vtable::<W>())) }
-}
+use waker::{waker_ref, ArcWake};
 
 // From mio https://github.com/tokio-rs/mio/blob/1667a7027382bd43470bc43e5982531a2e14b7ba/src/sys/unix/mod.rs
 macro_rules! syscall {
@@ -73,6 +35,7 @@ pub struct Timer {
 }
 
 impl Timer {
+    #[inline]
     pub fn new(deadline: Duration, reactor: Arc<Mutex<Reactor>>) -> Timer {
         Timer {
             deadline,
@@ -82,6 +45,7 @@ impl Timer {
         }
     }
 
+    #[inline]
     fn start_timer(deadline: Duration) -> Result<RawFd, std::io::Error> {
         let timer_fd = syscall!(timerfd_create(
             libc::CLOCK_MONOTONIC,
@@ -153,22 +117,24 @@ struct Waiter {
 }
 
 impl Waiter {
+    #[inline]
     fn new() -> Arc<Waiter> {
         Arc::new(Waiter {
             is_woken: AtomicBool::new(true),
         })
     }
 
+    #[inline]
     fn reset_waiter(&self) -> bool {
         use std::sync::atomic::Ordering;
-        self.is_woken.swap(false, Ordering::SeqCst)
+        self.is_woken.swap(false, Ordering::AcqRel)
     }
 }
 
 impl ArcWake for Waiter {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         use std::sync::atomic::Ordering;
-        arc_self.is_woken.store(true, Ordering::SeqCst);
+        arc_self.is_woken.store(true, Ordering::Release);
     }
 }
 
@@ -177,17 +143,17 @@ pub struct Executor {
 }
 
 impl Executor {
+    #[inline]
     pub fn new(reactor: Arc<Mutex<Reactor>>) -> Executor {
         Executor { reactor }
     }
 
-    pub fn block_on<F: Future>(self, future: F) -> F::Output {
-        let mut future = Box::pin(future);
-
+    pub fn block_on<F: Future>(self, mut future: F) -> F::Output {
+        let mut future = unsafe { Pin::new_unchecked(&mut future) };
         let waiter = Waiter::new();
-        let waker = waker(Arc::clone(&waiter));
+        let waker = waker_ref(&waiter);
+        let mut context = Context::from_waker(&*waker);
 
-        let mut context = Context::from_waker(&waker);
         loop {
             if waiter.reset_waiter() {
                 if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
@@ -206,6 +172,7 @@ pub struct Reactor {
 }
 
 impl Reactor {
+    #[inline]
     pub fn new() -> Result<Arc<Mutex<Reactor>>, std::io::Error> {
         let epoll_fd = syscall!(epoll_create1(libc::EPOLL_CLOEXEC))?;
 
@@ -262,9 +229,8 @@ impl Reactor {
     }
 }
 
-pub async fn sleep(deadline: Duration, reactor: Arc<Mutex<Reactor>>) -> Duration {
-    let now = Instant::now();
+#[inline]
+pub async fn sleep(deadline: Duration, reactor: Arc<Mutex<Reactor>>) {
     let timer = Timer::new(deadline, reactor);
     timer.await.expect("should not fail");
-    now.elapsed()
 }
