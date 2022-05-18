@@ -1,6 +1,9 @@
 #![deny(rust_2018_idioms)]
-use std::{sync::Arc, time::{Duration, Instant}, future::Future};
-use timer_future::{Executor, Reactor};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
+use timer_future::Executor;
 
 async fn elapsed(future: impl Future) -> Duration {
     let now = Instant::now();
@@ -12,12 +15,11 @@ async fn elapsed(future: impl Future) -> Duration {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    let reactor = Reactor::new()?;
-    let executor = Executor::new(Arc::clone(&reactor));
+    let executor = Executor::new()?;
 
     let total_elapsed = executor.block_on(async move {
-        let elapsed1 = elapsed(timer_future::sleep(Duration::from_secs(3), Arc::clone(&reactor))).await;
-        let elapsed2 = elapsed(timer_future::sleep(Duration::from_secs(5), Arc::clone(&reactor))).await;
+        let elapsed1 = elapsed(timer_future::sleep(Duration::from_secs(3))).await;
+        let elapsed2 = elapsed(timer_future::sleep(Duration::from_secs(5))).await;
 
         elapsed1 + elapsed2
     });
