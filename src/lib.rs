@@ -1,10 +1,11 @@
 #![deny(rust_2018_idioms)]
 mod reactor;
 mod syscall;
+mod task;
 pub mod waker;
 
 use std::{
-    collections::hash_map::Entry,
+    collections::{hash_map::Entry, VecDeque},
     fs::File,
     future::Future,
     io,
@@ -17,6 +18,7 @@ use std::{
 
 use reactor::Reactor;
 use syscall::syscall;
+use task::{JoinHandle, RawTask};
 use waker::{waker_ref, ArcWake};
 
 pub struct Timer {
@@ -122,8 +124,13 @@ impl ArcWake for Waiter {
     }
 }
 
+pub struct Spawner {
+    queue: Mutex<VecDeque<Arc<RawTask>>>,
+}
+
 pub struct Executor {
     reactor: Arc<Mutex<Reactor>>,
+    spawner: Arc<Spawner>,
 }
 
 impl Executor {
@@ -131,7 +138,22 @@ impl Executor {
     pub fn new() -> io::Result<Executor> {
         Ok(Executor {
             reactor: Arc::new(Mutex::new(Reactor::new()?)),
+            spawner: Arc::new(Spawner {
+                queue: Mutex::new(VecDeque::new()),
+            }),
         })
+    }
+
+    pub fn spawn<F: Future>(&self, future: F) -> JoinHandle<F::Output> {
+        let raw_task = Arc::new(RawTask::new(future, Arc::clone(&self.spawner)));
+
+        let mut queue = self.spawner.queue.lock().unwrap();
+        queue.push_back(Arc::clone(&raw_task));
+        drop(queue);
+
+        let join_handle = JoinHandle::new(raw_task);
+
+        join_handle
     }
 
     pub fn block_on<F: Future>(&self, mut future: F) -> F::Output {
@@ -147,6 +169,14 @@ impl Executor {
                     return value;
                 }
             }
+
+            let mut queue = self.spawner.queue.lock().unwrap();
+
+            for task in queue.drain(..) {
+                (task.vtable.poll)(task);
+            }
+
+            drop(queue);
 
             self.reactor.lock().unwrap().poll_events().unwrap();
         }
