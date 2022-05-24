@@ -151,9 +151,7 @@ impl Executor {
         queue.push_back(Arc::clone(&raw_task));
         drop(queue);
 
-        let join_handle = JoinHandle::new(raw_task);
-
-        join_handle
+        JoinHandle::new(raw_task)
     }
 
     pub fn block_on<F: Future>(&self, mut future: F) -> F::Output {
@@ -171,12 +169,19 @@ impl Executor {
             }
 
             let mut queue = self.spawner.queue.lock().unwrap();
+            let should_poll_future_again = !queue.is_empty();
 
             for task in queue.drain(..) {
                 (task.vtable.poll)(task);
             }
 
             drop(queue);
+
+            // We should poll the future again if we polled any tasks to ensure the `JoinHandle`
+            // was awaited before polling I/O events
+            if should_poll_future_again {
+                continue;
+            }
 
             self.reactor.lock().unwrap().poll_events().unwrap();
         }
